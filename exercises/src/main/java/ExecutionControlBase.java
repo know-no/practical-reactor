@@ -20,27 +20,27 @@ public class ExecutionControlBase {
     public Flux<String> semaphore() {
         return Flux.interval(
                 Duration.ofMillis(2250)
-        ).map(s -> "go").doOnNext(s -> System.out.println("Semaphore says: " + s));
+        ).map(s -> "go").doOnNext(s -> System.out.println("Semaphore says: " + s + " " + Thread.currentThread().getName()));
     }
 
     public Flux<Mono<String>> tasks() {
         return Flux.just(Mono.just("1")
-                             .doOnNext(n -> System.out.println("Executing task #1..."))
+                             .doOnNext(n -> System.out.println("Executing task #1..." + Thread.currentThread().getName()))
                              .delayElement(Duration.ofMillis(900))
                              .subscribeOn(Schedulers.boundedElastic()),
                          Mono.just("2")
-                             .doOnNext(n -> System.out.println("Executing task #2..."))
+                             .doOnNext(n -> System.out.println("Executing task #2..." + Thread.currentThread().getName()))
                              .delayElement(Duration.ofMillis(1000))
                              .subscribeOn(Schedulers.boundedElastic()),
                          Mono.just("3")
-                             .doOnNext(n -> System.out.println("Executing task #3..."))
+                             .doOnNext(n -> System.out.println("Executing task #3..." + Thread.currentThread().getName()))
                              .delayElement(Duration.ofMillis(800))
                              .subscribeOn(Schedulers.boundedElastic())
         );
     }
 
     public static void blockingCall() {
-        System.out.println("Executing blocking task...");
+        System.out.println("Executing blocking task..." + Thread.currentThread().getName());
         try {
             Thread.sleep(2000);
         } catch (InterruptedException e) {
@@ -50,7 +50,7 @@ public class ExecutionControlBase {
 
     public Flux<Event> eventProcessor() {
         return Flux.range(0, 500)
-                   .doOnNext(n -> System.out.println("Processing event #" + n))
+                   .doOnNext(n -> System.out.println("Processing event #" + n + " " + Thread.currentThread().getName()))
                    .map(i -> new Event(i % 2 == 0 ? "event#:" + i : "", "Event #" + UUID.randomUUID()));
     }
 

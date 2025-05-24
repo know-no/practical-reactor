@@ -6,6 +6,9 @@ import reactor.test.StepVerifier;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * In Reactor a Sink allows safe manual triggering of signals. We will learn more about multicasting and backpressure in
@@ -34,10 +37,25 @@ public class c8_Sinks extends SinksBase {
     @Test
     public void single_shooter() {
         //todo: feel free to change code as you need
-        Mono<Boolean> operationCompleted = null;
-        submitOperation(() -> {
+//        AtomicBoolean o = new AtomicBoolean(false);
+        Sinks.One<Boolean> s = Sinks.one();
+        Mono<Boolean> operationCompleted = s.asMono();
 
+//            Mono.create((msk) -> {
+//            System.out.println("defer");
+//            try {
+//                Thread.sleep(5500);
+//            } catch (InterruptedException e) {
+//                msk.error(new RuntimeException(e));
+//                return;
+//            }
+//            msk.success(true);
+//
+//        });
+        submitOperation(() -> {
             doSomeWork(); //don't change this line
+//            o.set(true);
+            s.tryEmitValue(true);
         });
 
         //don't change code below
@@ -55,10 +73,14 @@ public class c8_Sinks extends SinksBase {
     @Test
     public void single_subscriber() {
         //todo: feel free to change code as you need
-        Flux<Integer> measurements = null;
+        Sinks.Many<Integer> all = Sinks.many().replay().<Integer>all();
+        Flux<Integer> measurements = all.asFlux();
         submitOperation(() -> {
-
             List<Integer> measures_readings = get_measures_readings(); //don't change this line
+            for (Integer measure : measures_readings) {
+                all.tryEmitNext(measure);
+            }
+            all.tryEmitComplete();
         });
 
         //don't change code below
@@ -75,10 +97,15 @@ public class c8_Sinks extends SinksBase {
     @Test
     public void it_gets_crowded() {
         //todo: feel free to change code as you need
-        Flux<Integer> measurements = null;
+        Sinks.Many<Integer> objectMany = Sinks.many().multicast().onBackpressureBuffer();
+        Flux<Integer> measurements = objectMany.asFlux();
         submitOperation(() -> {
 
             List<Integer> measures_readings = get_measures_readings(); //don't change this line
+            for (Integer measure : measures_readings) {
+                objectMany.tryEmitNext(measure);
+            }
+            objectMany.tryEmitComplete();
         });
 
         //don't change code below
@@ -98,7 +125,9 @@ public class c8_Sinks extends SinksBase {
     @Test
     public void open_24_7() {
         //todo: set autoCancel parameter to prevent sink from closing
-        Sinks.Many<Integer> sink = Sinks.many().multicast().onBackpressureBuffer();
+        Sinks.Many<Integer> sink = Sinks.many().multicast().onBackpressureBuffer(
+            Integer.MAX_VALUE, false
+        );
         Flux<Integer> flux = sink.asFlux();
 
         //don't change code below
@@ -181,14 +210,29 @@ public class c8_Sinks extends SinksBase {
      * If yes, how? Find out and fix it.
      */
     @Test
-    public void emit_failure() {
+    public void emit_failure() throws InterruptedException {
         //todo: feel free to change code as you need
         Sinks.Many<Integer> sink = Sinks.many().replay().all();
 
+        Thread[] ts = new Thread[50];
         for (int i = 1; i <= 50; i++) {
             int finalI = i;
-            new Thread(() -> sink.tryEmitNext(finalI)).start();
+            Thread thread = new Thread(() -> sink.emitNext(finalI, ((signalType, emitResult) ->
+            {
+                if (emitResult.isFailure()) {
+                    System.out.println("emit failed");
+                    return true;
+                }
+                return false;
+            })));
+            thread.start();
+            ts[i - 1] = thread;
         }
+        for (Thread t : ts) {
+            t.join();
+        }
+//        sink.emitComplete(Sinks.EmitFailureHandler.FAIL_FAST);
+        sink.emitComplete((s, e) -> true);
 
         //don't change code below
         StepVerifier.create(sink.asFlux()

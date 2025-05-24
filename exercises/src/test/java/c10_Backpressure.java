@@ -39,6 +39,9 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class c10_Backpressure extends BackpressureBase {
 
+
+    // todo : 增加一些test, 比如limitRequest , 限制下游可请求的总量
+
     /**
      * In this exercise subscriber (test) will request several messages from the message stream.
      * Hook to the requests and record them to the `requests` list.
@@ -47,6 +50,7 @@ public class c10_Backpressure extends BackpressureBase {
     public void request_and_demand() {
         CopyOnWriteArrayList<Long> requests = new CopyOnWriteArrayList<>();
         Flux<String> messageStream = messageStream1()
+            .doOnRequest(requests::add)
                 //todo: change this line only
                 ;
 
@@ -71,6 +75,8 @@ public class c10_Backpressure extends BackpressureBase {
     public void limited_demand() {
         CopyOnWriteArrayList<Long> requests = new CopyOnWriteArrayList<>();
         Flux<String> messageStream = messageStream2()
+            .doOnRequest(requests::add)
+            .limitRate(1)
                 //todo: do your changes here
                 ;
 
@@ -95,7 +101,15 @@ public class c10_Backpressure extends BackpressureBase {
     public void uuid_generator() {
         Flux<UUID> uuidGenerator = Flux.create(sink -> {
             //todo: do your changes here
-        });
+            sink.onRequest(n -> {
+                for (int i = 0; i < n; i++) {
+                    if(sink.isCancelled()){
+                        return;
+                    }
+                    sink.next(i);
+                }
+            });
+        }).map(i -> UUID.randomUUID()).doOnRequest(System.out::println);
 
         StepVerifier.create(uuidGenerator
                                     .doOnNext(System.out::println)
@@ -116,6 +130,7 @@ public class c10_Backpressure extends BackpressureBase {
     @Test
     public void pressure_is_too_much() {
         Flux<String> messageStream = messageStream3()
+            .onBackpressureError()
                 //todo: change this line only
                 ;
 
@@ -137,6 +152,7 @@ public class c10_Backpressure extends BackpressureBase {
     @Test
     public void u_wont_brake_me() {
         Flux<String> messageStream = messageStream4()
+            .onBackpressureBuffer()
                 //todo: change this line only
                 ;
 
@@ -174,12 +190,18 @@ public class c10_Backpressure extends BackpressureBase {
                     @Override
                     protected void hookOnSubscribe(Subscription subscription) {
                         sub.set(subscription);
+                        subscription.request(10);
+
+
                     }
 
                     @Override
                     protected void hookOnNext(String s) {
                         System.out.println(s);
                         count.incrementAndGet();
+                        if(count.get() == 10){
+                           sub.get().cancel();
+                        }
                     }
                     //-----------------------------------------------------
                 });

@@ -16,11 +16,16 @@ public class BroadcastingBase {
 
     AtomicInteger counter = new AtomicInteger(0);
 
+    // generate 操作符会受到下游的预取（prefetch）策略影响。
     public Flux<Message> messageStream() {
         return Flux.<Integer>generate(sink -> {
+
                        int id = counter.getAndIncrement();
+                       System.out.println("Generated: " + id);
                        sink.next(id);
                    })
+//            .limitRate(1)
+//            .limitRequest(10)
                    .map(i -> new Message("user#" + i, "payload#" + i))
                    .delayElements(Duration.ofMillis(250))
                    .take(5);
