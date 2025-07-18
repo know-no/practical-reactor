@@ -27,6 +27,118 @@ import java.util.function.Function;
  */
 public class c7_ErrorHandling extends ErrorHandlingBase {
 
+
+    @Test
+    public void test3() {
+        /**
+         * 1. 标准的“信号传播”模型 (doOnError, onErrorResume)
+         * 在通常情况下，当一个操作符（如 map）内部发生错误时，它会做一件事：向下游传播一个 onError 终止信号。
+         * 这个信号会沿着操作链一直往下走，直到被某个操作符处理（如 onErrorResume）或者最终到达 subscribe 中的错误处理部分。
+         * doOnError 就是这个模型中的一个“监听者”。它位于信号传播的路径上，当 onError 信号经过它时，它会执行指定的操作（比如打印日志），然后让信号继续往下传。
+         * 如果您的代码是这样写的：
+         * Java
+         * .map(...) // 这里抛出异常
+         * .doOnError(...) // 错误信号到达，执行！
+         * .onErrorResume(...) // 错误信号被消费，流切换到备用方案
+         * 那么 doOnError 是会执行的。
+         * 2. 特殊的“上下文恢复”模型 (onErrorContinue)
+         * onErrorContinue 打破了上面的常规模型。它使用了 Reactor 的一个高级特性：上下文 (Context)。
+         * 在流订阅的阶段（也就是从下往上构建执行链的时候），onErrorContinue 会做一件特殊的事情：它会把它自己的恢复逻辑（您在 onErrorContinue 中写的 lambda 表达式）注册到 Context 中。
+         * 然后，当数据从上往下流动时：
+         * map 操作符（以及其他很多核心操作符）是“有 Context 意识的”。在它内部的 try-catch 块中，当它捕获到一个异常时，它不会立即发送 onError 信号。
+         * 相反，它会先检查 Context，看看有没有注册过“恢复函数”。
+         * 它发现了 onErrorContinue 注册的函数！
+         * 于是，map 直接调用了这个恢复函数，把异常和导致异常的元素 (3) 作为参数传进去。
+         * onErrorContinue 的逻辑（您写的 System.err.println）被执行。
+         * 执行完恢复逻辑后，map 就认为这个错误已经被“就地处理”了。它不会再向下游发送任何 onError 信号。它只会向上游请求下一个元素（request(1)），让数据流继续。
+         * 因为 map 从未发出过 onError 信号，所以 doOnError 根本就没有机会监听到任何东西。
+         * 一个比喻
+         * onError 信号：像是一个火灾警报。一旦拉响（map 出错），警报声（onError 信号）会传遍整个楼层（下游操作链），每个房间（doOnError）都能听到，直到消防队（onErrorResume）赶来灭火。
+         * onErrorContinue：像是在 map 这个房间里安装了一个自动灭火喷头（注册到 Context 的恢复函数）。一旦有小火苗（异常），喷头立刻启动把火灭了。因为火被当场扑灭，所以根本就没有机会去拉响整栋楼的火灾警报。楼下的保安（doOnError）自然什么也不知道。
+         * 结论
+         * doOnError 和 onErrorContinue 并不是简单的“谁先谁后”的优先级关系。它们工作在完全不同的机制上。onErrorContinue 通过 Context 从根本上改变了上游操作符处理错误的方式，阻止了 onError 信号的产生，因此无论 doOnError 放在链中的哪个位置（只要在出错点下游），它都无法被触发。
+         */
+        {
+            System.out.println("--- onErrorContinue 正确用法 ---");
+            Flux.range(1, 4) // 源头是 1, 2, 3, 4
+                .doOnCancel(() -> System.out.println("上游收到取消信号")) // 不会调用
+                .map(i -> {
+                    if (i == 3) {
+                        // 在处理元素 '3' 时抛出异常
+                        throw new ArithmeticException("处理 '3' 时出错!");
+                    }
+                    return "成功处理: " + i;
+                })
+
+                .doOnComplete(() -> System.out.println("下游完成"))
+                .doOnCancel(() -> System.out.println("下游cancel"))
+                .doOnError(error -> System.out.println("下游error: " + error.getMessage()))
+                 .onErrorContinue((throwable, item) -> {
+//                      这个会执行！
+                     System.err.println("!!! onErrorContinue 捕获到错误: " + throwable.getMessage());
+                     System.err.println("!!! 跳过的元素是: " + item); // 这里的 item 就是导致错误的 '3'
+                 })
+                .subscribe(
+                    System.out::println,
+                    error -> System.err.println("最终订阅者收到错误: " + error), // 这不会被调用
+                    () -> System.out.println("最终订阅者完成") // 这会被调用
+                );
+        }
+    }
+
+    @Test
+    public void test1() {
+        // 模拟一个在发出 '2' 之后会因内部错误而终止的 Flux
+        Flux<String> stringFlux = Flux.create(sink -> {
+            System.out.println("源头流: 发送 1");
+            sink.next("1");
+            System.out.println("源头流: 发送 2");
+            sink.next("2");
+            System.out.println("源头流: 内部发生致命错误，即将终止...");
+            sink.error(new IllegalStateException("Source Flux failed!")); // sink的error信号, 下游调用onErrorContinue也不能恢复了
+//            错误是通过 sink.error() 直接发出的终止信号，而不是在处理元素过程中发生的错误; 所以恢复不了
+//            错误的本质：你的错误是流级别的终止信号，而不是元素级别的处理错误
+            // 下面的代码不会被执行
+             sink.next("3");
+             sink.complete();
+        });
+
+        System.out.println("--- 订阅开始 ---");
+
+        stringFlux
+            .doOnNext(item -> System.out.println("下游收到: " + item))
+            .doOnComplete(() -> System.out.println("下游处理完成x"))
+            .doOnCancel(() -> System.out.println("下游处理cancel"))
+            .onErrorContinue((throwable, o) -> {
+                System.out.println("onErrorContinue 捕获到错误: " + throwable.getMessage());
+                System.out.println("导致错误的对象: " + o); // 注意：这里 o 会是 null，因为错误是终止信号，不是由特定元素引起的
+            })
+            .doOnComplete(() -> System.out.println("下游处理完成y"))
+            .blockLast(); // 仅为演示目的，阻塞等待
+
+        System.out.println("--- 程序结束 ---");
+    }
+
+    @Test
+    public void test() {
+        Flux.just(1, 2, 3, 4, 5)
+            .doOnCancel(() -> System.out.println("上游收到取消信号"))
+            .map(i -> {
+                if (i == 3) throw new RuntimeException("错误!");
+                return i;
+            })
+            .subscribe(
+                System.out::println,
+                error -> System.out.println("错误: " + error.getMessage())
+            );
+
+        // 输出：
+        // 1
+        // 2
+        // 上游收到取消信号
+        // 错误: 错误!
+    }
+
     /**
      * You are monitoring hearth beat signal from space probe. Heart beat is sent every 1 second.
      * Raise error if probe does not any emit heart beat signal longer then 3 seconds.

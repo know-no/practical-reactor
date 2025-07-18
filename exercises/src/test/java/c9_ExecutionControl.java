@@ -13,10 +13,10 @@ import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
 
+import java.io.IOException;
 import java.time.Duration;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Random;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -47,6 +47,436 @@ import java.util.stream.Stream;
  * @author Stefan Dragisic
  */
 public class c9_ExecutionControl extends ExecutionControlBase {
+
+    @Test
+    public void testCancelTiming() throws IOException {
+        AtomicInteger counter = new AtomicInteger(0);
+
+        Flux<String> flux = Flux.<String>create(sink -> {
+                sink.onDispose(() -> {
+                    int order = counter.incrementAndGet();
+                    System.out.println("sink.onDispose 执行顺序: " + order);
+                });
+                sink.onCancel(() -> {
+                    int order = counter.incrementAndGet();
+                    System.out.println("sink.onCancel 执行顺序: " + order);
+                });
+            })
+//            .timeout(Duration.ofMillis(500))
+            .doOnComplete(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("doOnComplete 执行顺序: " + order);
+            })
+            .doOnCancel(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("doOnCancel 执行顺序: " + order);
+            })
+            .doFinally((signalType -> {
+                int order = counter.incrementAndGet();
+                System.out.println("signalType: " + signalType + " 执行顺序: " + order);
+            }))
+
+            ;
+
+        Disposable subscription = flux.subscribe();
+        // 主动取消
+        subscription.dispose();
+
+        System.in.read();
+        // 输出：
+//        doOnCancel 执行顺序: 1
+//        sink.onCancel 执行顺序: 2
+//        sink.onDispose 执行顺序: 3
+//        signalType: cancel 执行顺序: 4
+    }
+
+
+    // 超时算子放置的位置不同, 也会影响是否调用doOnCancel
+    @Test
+    public void testTimeoutSig() throws IOException, InterruptedException {
+        AtomicInteger counter = new AtomicInteger(0);
+
+        Flux<String> flux = Flux.<String>create(sink -> {
+                sink.onDispose(() -> {
+                    int order = counter.incrementAndGet();
+                    System.out.println("sink.onDispose 执行顺序: " + order);
+                });
+                sink.onCancel(() -> {
+                    int order = counter.incrementAndGet();
+                    System.out.println("sink.onCancel 执行顺序: " + order);
+                });
+            })
+            // 超时 , 不会调用下游doOnCancel,会向下发送error,向上发送cancel
+            .log("source")
+            .timeout(Duration.ofMillis(500))
+            .log("after-timeout")
+            .doOnCancel(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("doOnCancel 执行顺序: " + order);
+            })
+            .doOnComplete(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("doOnComplete 执行顺序: " + order);
+            })
+            .doOnTerminate(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("terminate: " + " 执行顺序: " + order);
+            })
+//            .doOnTerminate(() -> )
+            .doFinally((signalType -> {
+                int order = counter.incrementAndGet();
+                System.out.println("signalType: " + signalType + " 执行顺序: " + order);
+            }))
+            // 超时 , 会调用doOnCancel; 向上发送cancel, 向下发送error
+//            .timeout(Duration.ofMillis(500))
+
+            ;
+//        timeout操作符的位置决定了信号传播方向：
+//        timeout在downstream → cancel信号向upstream传播 → upstream的doOnCancel被调用
+//        timeout在upstream → error信号向downstream传播 → downstream的doOnCancel不被调用
+
+        Disposable subscription = flux.subscribe();
+        // 等超时
+
+//        System.in.read();
+        Thread.sleep(2000);
+        System.out.println("sleeped");
+//        subscription.dispose(); 因为已经超时异常了, 取消不会有效果
+        Thread.sleep(2000);
+
+        // 输出：
+        // sink.onCancel 执行顺序: 1
+        // sink.onDispose 执行顺序: 2
+//        terminate:  执行顺序: 3
+        // 错误的堆栈打印
+        // signalType: onError 执行顺序: 4
+        // 如果timeout放在了前面,  doOnCancel 是不会执行的, 也就是说在doOnCancel里是无法感知到一些其他情况的!
+        // 但是放在后面就可以, 且终止信号是timeout
+    }
+
+
+
+    @Test
+    public void testEarlyTake() throws IOException, InterruptedException {
+        AtomicInteger counter = new AtomicInteger(0);
+
+        Flux<String> flux = Flux.<String>create(sink -> {
+                sink.onDispose(() -> {
+                    int order = counter.incrementAndGet();
+                    System.out.println("sink.onDispose 执行顺序: " + order);
+                });
+                sink.onCancel(() -> {
+                    int order = counter.incrementAndGet();
+                    System.out.println("sink.onCancel 执行顺序: " + order);
+                });
+                sink.next("1");
+                System.out.println("sink emit 1");
+                sink.next("2");
+                System.out.println("sink emit 2");
+                sink.next("3");
+                System.out.println("sink emit 3");
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                System.out.println("sleeped and complete");
+                System.out.println("sink emit 4");
+                sink.complete();
+            })
+            .doOnCancel(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("doOnCancel before take执行顺序: " + order);
+            })
+            .take(2)
+            .doOnCancel(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("doOnCancel after take执行顺序: " + order);
+            })
+            .doOnComplete(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("doOnComplete 执行顺序: " + order);
+            })
+            .doOnTerminate(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("terminate: " + " 执行顺序: " + order);
+            })
+            //            .doOnTerminate(() -> )
+            .doFinally((signalType -> {
+                int order = counter.incrementAndGet();
+                System.out.println("signalType: " + signalType + " 执行顺序: " + order);
+            }))
+
+            ;
+
+        Disposable subscription = flux
+            // 这里delay 多久和不delay, take1和take x 还有 sink emit的市场都会影响流的结束
+//            .delayElements(Duration.ofMillis(100))
+//            .take(2)
+            .subscribe()
+        ;
+        // 等超时
+
+        Thread.sleep(3000);
+        // 已经被take了, 取消了,  dispose不会再执行一次
+        subscription.dispose();
+        Thread.sleep(3000);
+//        sink emit 1
+//        sink emit 2
+//        sink emit 3
+//        doOnCancel 执行顺序: 1
+//        sink.onCancel 执行顺序: 2
+//        sink.onDispose 执行顺序: 3
+//        signalType: cancel 执行顺序: 4
+//        sleeped and complete
+        // 或者
+//        sink emit 1
+//        sink emit 2
+//        sink emit 3
+//        sleeped and complete
+//        doOnComplete 执行顺序: 1
+//        terminate:  执行顺序: 2
+//        signalType: onComplete 执行顺序: 3
+//        sink.onDispose 执行顺序: 4
+//        doOnCancel 执行顺序: 5
+
+
+
+    }
+
+
+    @Test
+    public void testDownStreamError() throws IOException, InterruptedException {
+        AtomicInteger counter = new AtomicInteger(0);
+
+        Flux<String> flux = Flux.<String>create(sink -> {
+                sink.onDispose(() -> {
+                    int order = counter.incrementAndGet();
+                    System.out.println("sink.onDispose 执行顺序: " + order);
+                });
+                sink.onCancel(() -> {
+                    int order = counter.incrementAndGet();
+                    System.out.println("sink.onCancel 执行顺序: " + order);
+                });
+                sink.next("1");
+                System.out.println("sink emit 1");
+                sink.next("2");
+                System.out.println("sink emit 2");
+                sink.next("3");
+                System.out.println("sink emit 3");
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                System.out.println("sleeped and complete");
+                System.out.println("sink emit 4");
+                sink.complete();
+            }).doOnCancel(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("doOnCancel before take执行顺序: " + order);
+            })
+//            .take(3).doOnCancel(() -> {
+//                int order = counter.incrementAndGet();
+//                System.out.println("doOnCancel after take执行顺序: " + order);
+//            })
+            .doOnComplete(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("doOnComplete 执行顺序: " + order);
+            }).doOnTerminate(() -> {
+                int order = counter.incrementAndGet();
+                System.out.println("terminate: " + " 执行顺序: " + order);
+            })
+            //            .doOnTerminate(() -> )
+            .doFinally((signalType -> {
+                int order = counter.incrementAndGet();
+                System.out.println("signalType: " + signalType + " 执行顺序: " + order);
+            }));
+
+        AtomicInteger a = new AtomicInteger();
+        Disposable subscription = flux
+//            .onErrorContinue((e, v) -> {
+//                System.out.println(e);
+//                System.out.println(v);
+//            })
+            .map((i) -> {
+                if(a.getAndIncrement() > 1) {
+                    throw new RuntimeException("xxxxx");
+                }else{
+                    return i;
+                }
+
+            })
+            .onErrorContinue((e, v) -> {
+                System.out.println(e);
+                System.out.println(v);
+            })
+            .doOnNext(i -> System.out.println("doOnNext: " + i))
+
+            .subscribe();
+        // 等超时
+
+        Thread.sleep(3000);
+        // 已经被take了, 取消了,  dispose不会再执行一次
+        subscription.dispose();
+        Thread.sleep(3000);
+    }
+
+
+
+    @Test
+    void testConcurrency() {
+        AtomicInteger counter = new AtomicInteger();
+        Set<String> threadNames = ConcurrentHashMap.newKeySet();
+
+        Flux.range(1, 1000)
+            .parallel(4)  // 🔑 强制并发
+            .runOn(Schedulers.parallel())
+            .flatMap(i -> {
+                threadNames.add(Thread.currentThread().getName());  // 记录线程名
+                return Flux.just("item-" + i);
+            })
+//            .sequential()
+            .subscribe(item -> counter.incrementAndGet());
+
+        // 结果：多个线程名被记录，证明有并发
+        System.out.println("Thread count: " + threadNames.size());  // > 1
+    }
+
+    @Test
+    void testBlockingBehavior() {
+        long start = System.currentTimeMillis();
+
+        // 要认真区分这些差别
+        Flux.range(1, 5)
+//            .parallel(5)
+//            .runOn(Schedulers.parallel())
+            .flatMap(i -> Flux.just(simulateHeavyOperation(i)), 5)  // 🔑 阻塞操作
+            .subscribe(System.out::println);
+
+        long duration = System.currentTimeMillis() - start;
+        System.out.println("Total time: " + duration + "ms");  // 约 5秒（串行执行）
+    }
+
+    private String simulateHeavyOperation(int i) {
+        try {
+            Thread.sleep(1000);  // 模拟1秒的重操作
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return "Result-" + i;
+    }
+
+    @Test
+    void testParallelFlatMapOrdering() {
+        List<String> results = Collections.synchronizedList(new ArrayList<>());
+        Map<String, List<Integer>> threadResults = new ConcurrentHashMap<>();
+
+        List<String> block = Flux.range(1, 20).parallel(4).runOn(Schedulers.parallel()).flatMap(i -> {
+            String threadName = Thread.currentThread().getName();
+            threadResults.computeIfAbsent(threadName, k -> new ArrayList<>()).add(i);
+
+            // 模拟重操作
+            //                try { Thread.sleep(100); } catch (InterruptedException e) {}
+            return Flux.just("result-" + i);
+        }).sequential().doOnNext(i -> System.out.println(Thread.currentThread().getName())).collectList().block();
+        // sequential 只是合并了一个轨道
+
+        // 验证：每个线程内的处理顺序是有序的
+        threadResults.forEach((thread, items) -> {
+            System.out.println(thread + ": " + items);
+            // 每个线程内：[1,5,9,13,17] 或 [2,6,10,14,18] 等 - 有序
+        });
+        System.out.println(block);
+    }
+
+    @Test
+    void testFlatMapWithSubscribeOn() {
+        System.out.println("Main thread: " + Thread.currentThread().getName());
+
+        Flux.range(1, 3)
+            .doOnNext(i -> System.out.println("Upstream: " + i + " on " + Thread.currentThread().getName()))
+            .flatMap(i ->
+                // 此callable并非是 Flux.just的那个callable
+                Mono.fromCallable(() -> {
+                        System.out.println("Heavy work: " + i + " on " + Thread.currentThread().getName());
+                        Thread.sleep(1000);
+                        return "result-" + i;
+                    })
+                    .subscribeOn(Schedulers.boundedElastic())  // 🔑 指定执行线程池
+            )
+            .doOnNext(result -> System.out.println("Result: " + result + " on " + Thread.currentThread().getName()))
+            .blockLast();
+    }
+
+    @Test
+    void testFlatMapWithPublishOn() {
+        Flux.range(1, 3)
+            .doOnNext(i -> System.out.println("Upstream: " + i + " on " + Thread.currentThread().getName()))
+            .flatMap(i ->
+                Flux.just("processing-" + i)
+                    .map(s -> {
+                        simulateHeavyOperation(i);
+                        System.out.println("Processing: " + s + " on " + Thread.currentThread().getName());
+                        return s + "-done";
+                    })
+                    .publishOn(Schedulers.parallel())  // 🔑 切换下游线程池, 后续的结果也会在对应的线程池里
+            )
+            .doOnNext(result -> System.out.println("Result: " + result + " on " + Thread.currentThread().getName()))
+            .blockLast();
+    }
+
+
+    @Test
+    void testFlatMapNoScheduler() {
+        Flux.range(1, 3)
+            .doOnNext(i -> System.out.println("Upstream: " + i + " on " + Thread.currentThread().getName()))
+            .flatMap(i ->
+                Flux.range(i * 10, 2)  // 🔑 内部 Flux 无调度器
+                    .map(n -> {
+                        simulateHeavyOperation(i);
+                        System.out.println("Inner processing: " + n + " on " + Thread.currentThread().getName());
+                        return "result-" + n;
+                    })
+            )
+            .doOnNext(result -> System.out.println("Result: " + result + " on " + Thread.currentThread().getName()))
+            .blockLast();
+    }
+
+    @Test
+    void testFlatMapNoScheduler2() {
+        Flux.range(1, 4)
+            .doOnNext(i -> System.out.println("Upstream: " + i + " on " + Thread.currentThread().getName()))
+            .flatMap(i ->
+                Flux.range(i * 10, 2)  // 🔑 内部 Flux 有调度器
+                    .map(n -> {
+                        System.out.println("Inner processing: " + n + " on " + Thread.currentThread().getName());
+                        return "result-" + n;
+                    }).publishOn(Schedulers.parallel()) // 影响元素后续的处理线程
+            )
+            .doOnNext(result -> System.out.println("Result: " + result + " on " + Thread.currentThread().getName()))
+            .blockLast();
+    }
+
+    @Test
+    void testThreadPropagation() {
+        Flux.range(1, 3)
+            .doOnNext(i -> System.out.println("1. Upstream: " + i + " on " + Thread.currentThread().getName()))
+            .flatMap(i -> {
+                System.out.println("2. FlatMap start: " + i + " on " + Thread.currentThread().getName());
+                return Flux.just("processing-" + i)
+                    .doOnNext(s -> System.out.println("3. Before map: " + s + " on " + Thread.currentThread().getName()))
+                    .map(s -> {
+                        System.out.println("4. Inside map: " + s + " on " + Thread.currentThread().getName());
+                        return s + "-done";
+                    })
+                    .doOnNext(s -> System.out.println("5. After map: " + s + " on " + Thread.currentThread().getName()))
+                    .publishOn(Schedulers.parallel())
+                    .doOnNext(s -> System.out.println("6. After publishOn: " + s + " on " + Thread.currentThread().getName()));
+            })
+            .doOnNext(result -> System.out.println("7. Outside flatMap: " + result + " on " + Thread.currentThread().getName()))
+            .blockLast();
+    }
 
     @Test
     public void test_flat_map_and_mono_thread() throws InterruptedException {
@@ -363,5 +793,27 @@ public class c9_ExecutionControl extends ExecutionControlBase {
         } catch (JsonProcessingException e) {
             throw Exceptions.propagate(e);
         }
+    }
+
+    @Test
+    public void test2() throws InterruptedException {
+        // 模拟场景
+        Flux<String> innerFlux = Flux.just("1", "2", "3")
+            .delayElements(Duration.ofMillis(100))
+            .take(1); // 这会在发送第一个元素后取消
+
+        Flux<String> outerFlux = Flux.create(sink -> {
+            innerFlux.subscribe(
+                sink::next,    // 只会收到 "1"
+                sink::error,   // 不会被调用
+                sink::complete // 不会被调用，因为是取消而不是完成
+            );
+        });
+        Disposable subscribe = outerFlux.subscribe(System.out::println);
+
+        // 外部订阅者会一直等待，因为 sink 没有完成或出错
+        Thread.currentThread().sleep(5000);
+        System.out.println(subscribe.isDisposed());
+
     }
 }
